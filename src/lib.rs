@@ -27,7 +27,6 @@ use std::collections::hash_map::DefaultHasher;
 use std::error::Error as StdError;
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::iter::repeat;
 use std::marker::PhantomData;
 use std::mem;
 
@@ -60,6 +59,10 @@ impl StdError for CuckooError {
 
 /// A cuckoo filter class exposes a Bloomier filter interface,
 /// providing methods of add, delete, contains.
+///
+/// The default RNG is `ThreadRng`, which makes the filter neither `Send` nor
+/// `Sync`. Use a custom RNG with the required traits when sharing filters
+/// between threads.
 ///
 /// # Examples
 ///
@@ -108,9 +111,10 @@ impl StdError for CuckooError {
 ///
 /// ```
 #[derive(Debug, Clone)]
-pub struct CuckooFilter<H> {
+pub struct CuckooFilter<H, R = rand::rngs::ThreadRng> {
     buckets: Box<[Bucket]>,
     len: usize,
+    rng: R,
     _hasher: std::marker::PhantomData<H>,
 }
 
@@ -127,7 +131,57 @@ impl CuckooFilter<DefaultHasher> {
     }
 }
 
-impl<H> CuckooFilter<H>
+impl<R: rand::RngCore> CuckooFilter<DefaultHasher, R> {
+    /// Constructs a filter with the given capacity and RNG, using `DefaultHasher`.
+    ///
+    /// Identical RNG states and insertion sequences produce identical evictions
+    /// when hashing produces identical results. Cross-platform or cross-version
+    /// replication also requires stable hashing of the input values.
+    ///
+    /// ```
+    /// use cuckoofilter::CuckooFilter;
+    /// use rand::SeedableRng;
+    /// use rand_chacha::ChaCha8Rng;
+    ///
+    /// let filter = CuckooFilter::with_rng(100, ChaCha8Rng::seed_from_u64(42));
+    /// ```
+    pub fn with_rng(capacity: usize, rng: R) -> Self {
+        Self::with_hasher_and_rng(capacity, DefaultHasher::default(), rng)
+    }
+}
+
+impl<H: Hasher + Default, R: rand::RngCore> CuckooFilter<H, R> {
+    /// Constructs a filter with the given capacity, hasher type, and RNG.
+    ///
+    /// The supplied hasher selects the type `H`; its state is not retained.
+    /// The filter creates `H::default()` for each hash operation.
+    /// The RNG is stored without consuming any random values.
+    ///
+    /// ```
+    /// use cuckoofilter::CuckooFilter;
+    /// use fnv::FnvHasher;
+    /// use rand::SeedableRng;
+    /// use rand_chacha::ChaCha8Rng;
+    ///
+    /// let filter = CuckooFilter::with_hasher_and_rng(
+    ///     100,
+    ///     FnvHasher::default(),
+    ///     ChaCha8Rng::seed_from_u64(42),
+    /// );
+    /// ```
+    pub fn with_hasher_and_rng(capacity: usize, _hasher: H, rng: R) -> Self {
+        let capacity = cmp::max(1, capacity.next_power_of_two() / BUCKET_SIZE);
+
+        Self {
+            buckets: vec![Bucket::new(); capacity].into_boxed_slice(),
+            len: 0,
+            rng,
+            _hasher: PhantomData,
+        }
+    }
+}
+
+impl<H> CuckooFilter<H, rand::rngs::ThreadRng>
 where
     H: Hasher + Default,
 {
@@ -136,15 +190,15 @@ where
         let capacity = cmp::max(1, cap.next_power_of_two() / BUCKET_SIZE);
 
         Self {
-            buckets: repeat(Bucket::new())
-                .take(capacity)
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
+            buckets: vec![Bucket::new(); capacity].into_boxed_slice(),
             len: 0,
+            rng: rand::thread_rng(),
             _hasher: PhantomData,
         }
     }
+}
 
+impl<H: Hasher + Default, R: rand::RngCore> CuckooFilter<H, R> {
     /// Checks if `data` is in the filter.
     pub fn contains<T: ?Sized + Hash>(&self, data: &T) -> bool {
         let FaI { fp, i1, i2 } = get_fai::<T, H>(data);
@@ -172,13 +226,12 @@ where
             return Ok(());
         }
         let len = self.buckets.len();
-        let mut rng = rand::thread_rng();
-        let mut i = fai.random_index(&mut rng);
+        let mut i = fai.random_index(&mut self.rng);
         let mut fp = fai.fp;
         for _ in 0..MAX_REBUCKET {
             let other_fp;
             {
-                let loc = &mut self.buckets[i % len].buffer[rng.gen_range(0..BUCKET_SIZE)];
+                let loc = &mut self.buckets[i % len].buffer[self.rng.gen_range(0..BUCKET_SIZE)];
                 other_fp = *loc;
                 *loc = fp;
                 i = get_alt_index::<H>(other_fp, i);
@@ -217,6 +270,7 @@ where
     /// Exports fingerprints in all buckets, along with the filter's length for storage.
     /// The filter can be recovered by passing the `ExportedCuckooFilter` struct to the
     /// `from` method of `CuckooFilter`.
+    /// RNG state is not exported; importing a filter initializes a new `ThreadRng`.
     pub fn export(&self) -> ExportedCuckooFilter {
         self.into()
     }
@@ -296,11 +350,11 @@ impl<H> From<ExportedCuckooFilter> for CuckooFilter<H> {
     /// # Contents
     ///
     /// * `values` - A serialized version of the `CuckooFilter`'s memory, where the
-    /// fingerprints in each bucket are chained one after another, then in turn all
-    /// buckets are chained together.
+    ///   fingerprints in each bucket are chained one after another, then in turn all
+    ///   buckets are chained together.
     /// * `length` - The number of valid fingerprints inside the `CuckooFilter`.
-    /// This value is used as a time saving method, otherwise all fingerprints
-    /// would need to be checked for equivalence against the null pattern.
+    ///   This value is used as a time saving method, otherwise all fingerprints
+    ///   would need to be checked for equivalence against the null pattern.
     fn from(exported: ExportedCuckooFilter) -> Self {
         // Assumes that the `BUCKET_SIZE` and `FINGERPRINT_SIZE` constants do not change.
         Self {
@@ -311,21 +365,58 @@ impl<H> From<ExportedCuckooFilter> for CuckooFilter<H> {
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             len: exported.length,
+            rng: rand::thread_rng(),
             _hasher: PhantomData,
         }
     }
 }
 
-impl<H> From<&CuckooFilter<H>> for ExportedCuckooFilter
+impl<H, R> From<&CuckooFilter<H, R>> for ExportedCuckooFilter
 where
     H: Hasher + Default,
+    R: rand::RngCore,
 {
     /// Converts a `CuckooFilter` into a simplified version which can be serialized and stored
     /// for later use.
-    fn from(cuckoo: &CuckooFilter<H>) -> Self {
+    fn from(cuckoo: &CuckooFilter<H, R>) -> Self {
         Self {
             values: cuckoo.values(),
             length: cuckoo.len(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+
+    #[test]
+    fn test_deterministic_eviction() {
+        let mut filter1 = CuckooFilter::with_rng(100, ChaCha8Rng::seed_from_u64(42));
+        let mut filter2 = CuckooFilter::with_rng(100, ChaCha8Rng::seed_from_u64(42));
+        let mut failures = 0;
+
+        // Capacity rounds up to 128 slots, so 150 insertions force eviction
+        // and exercise the failure path after the filter fills up.
+        for item in 0..150_u64 {
+            let result1 = filter1.add(&item);
+            let result2 = filter2.add(&item);
+            assert_eq!(result1.is_ok(), result2.is_ok(), "item {item}");
+            if result1.is_err() {
+                failures += 1;
+            }
+
+            let state1 = filter1.export();
+            let state2 = filter2.export();
+            assert_eq!(state1.values, state2.values, "item {item}");
+            assert_eq!(state1.length, state2.length, "item {item}");
+        }
+
+        assert!(failures > 0);
+        // Check that eviction actually consumed the injected RNG.
+        assert!(filter1.rng.get_word_pos() > 0);
+        assert_eq!(filter1.rng.get_word_pos(), filter2.rng.get_word_pos());
     }
 }

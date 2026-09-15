@@ -3,7 +3,6 @@
 extern crate cuckoofilter;
 #[cfg(feature = "farmhash")]
 extern crate farmhash;
-#[cfg(feature = "fnv")]
 extern crate fnv;
 extern crate rand;
 extern crate test;
@@ -18,7 +17,7 @@ fn get_words() -> String {
     let display = path.display();
 
     // Open the path in read-only mode, returns `io::Result<File>`
-    let mut file = match File::open(&path) {
+    let mut file = match File::open(path) {
         // The `description` method of `io::Error` returns a string that
         // describes the error
         Err(why) => panic!("couldn't open {}: {}", display, &why),
@@ -56,7 +55,7 @@ fn bench_clear(b: &mut test::Bencher) {
     let mut cf = test::black_box(CuckooFilter::new());
 
     b.iter(|| {
-        test::black_box(cf.clear());
+        test::black_box(&mut cf).clear();
     });
 }
 
@@ -66,7 +65,6 @@ fn bench_insertion_farmhash(b: &mut test::Bencher) {
     perform_insertions::<farmhash::FarmHasher>(b);
 }
 
-#[cfg(feature = "fnv")]
 #[bench]
 fn bench_insertion_fnv(b: &mut test::Bencher) {
     perform_insertions::<fnv::FnvHasher>(b);
