@@ -1,7 +1,8 @@
 [package]
-name = "cuckoofilter"
-version = "0.5.0"
+name = "valkey-cuckoo"
+version = "0.1.0"
 authors = [
+  "Sam Shaplygin <semyuon@gmail.com>",
   "Seif Lotfy <seif.lotfy@gmail.com>",
   "Seif Lotfy <seif@axiom.co>",
   "Florian Jacob <accounts+git@florianjacob.de>",
@@ -10,11 +11,12 @@ authors = [
 
 # A short blurb about the package. This is not rendered in any format when
 # uploaded to crates.io (aka this is not markdown)
-description = "Cuckoo Filter: Practically Better Than Bloom"
+description = "Cuckoo filter with injectable RNGs for deterministic eviction; a fork of cuckoofilter"
 
 # These URLs point to more information about the repository
-homepage = "http://axiom.co"
-repository = "https://github.com/axiomhq/rust-cuckoofilter"
+homepage = "https://github.com/sshaplygin/rust-cuckoofilter/tree/release/valkey-cuckoo"
+repository = "https://github.com/sshaplygin/rust-cuckoofilter"
+documentation = "https://docs.rs/valkey-cuckoo"
 
 # This points to a file in the repository (relative to this Cargo.toml). The
 # contents of this file are stored and indexed in the registry.
@@ -31,6 +33,9 @@ keywords = ["bloomfilter", "cuckoohashing", "cuckoofilter"]
 license = "MIT"
 
 edition = "2018"
+
+[lib]
+name = "cuckoofilter"
 
 [features]
 default = []

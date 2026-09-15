@@ -2,12 +2,12 @@
 //!
 //! # Usage
 //!
-//! This crate is [on crates.io](https://crates.io/crates/cuckoofilter) and can be
-//! used by adding `cuckoofilter` to the dependencies in your project's `Cargo.toml`.
+//! This fork is [on crates.io](https://crates.io/crates/valkey-cuckoo) and can be
+//! used under the `cuckoofilter` dependency name in your project's `Cargo.toml`.
 //!
 //! ```toml
 //! [dependencies]
-//! cuckoofilter = "0.3"
+//! cuckoofilter = { package = "valkey-cuckoo", version = "0.1.0" }
 //! ```
 //!
 //! And this in your crate root:

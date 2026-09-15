@@ -4,7 +4,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## valkey-cuckoo 0.1.0
+
+- Initial independent fork of `cuckoofilter` 0.5.0, retaining its MIT license and `cuckoofilter` library name.
+- Add generic RNG storage, `with_rng`, and `with_hasher_and_rng` for deterministic eviction with caller-supplied RNGs.
+- Verify identical bucket states through successful and failed insertions with identically seeded ChaCha8 RNGs.
+- Default filters retain `ThreadRng`, which makes them neither `Send` nor `Sync`.
+- Export/import retains its existing data format and does not preserve RNG state.
+
+## Upstream history
+
+### [Unreleased]
 ### Changed
 - Serde support is now behind the feature flag `serde_support` and is disabled by default.
 

@@ -1,9 +1,41 @@
-# Cuckoo Filter
+# valkey-cuckoo
 
-[![Crates.io](https://img.shields.io/crates/v/cuckoofilter.svg?maxAge=2592000)](https://crates.io/crates/cuckoofilter)
+[![Crates.io](https://img.shields.io/crates/v/valkey-cuckoo.svg)](https://crates.io/crates/valkey-cuckoo)
 
-[Documentation](https://docs.rs/cuckoofilter)
+[Documentation](https://docs.rs/valkey-cuckoo)
 
+An independently maintained fork of [axiomhq/rust-cuckoofilter](https://github.com/axiomhq/rust-cuckoofilter), published by Sam Shaplygin for work on deterministic cuckoo eviction in Valkey modules. This is not an official Valkey project release. The upstream MIT license and contributor attribution are retained.
+
+## Installation
+
+The library keeps the `cuckoofilter` import name. Replace the upstream dependency with:
+
+```toml
+[dependencies]
+cuckoofilter = { package = "valkey-cuckoo", version = "0.1.0" }
+```
+
+## Deterministic eviction
+
+Add `rand = "0.8"` and `rand_chacha = "0.3"` to your dependencies, then supply a seeded RNG:
+
+```rust
+use cuckoofilter::CuckooFilter;
+use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
+
+let mut filter = CuckooFilter::with_rng(100, ChaCha8Rng::seed_from_u64(42));
+filter.add("hello world").unwrap();
+assert!(filter.contains("hello world"));
+```
+
+Identical RNG states and operation sequences produce identical eviction choices when input hashes match. Replicas must use the same seed, operation order, hashing behavior, and RNG implementation. Cross-platform or cross-version replication also requires stable hashing of input values.
+
+`new()` and `with_capacity()` continue to use `ThreadRng`; storing it makes the default filter neither `Send` nor `Sync`. Seeded RNGs such as `ChaCha8Rng` can provide those traits. `with_hasher_and_rng` selects the hasher type; it does not retain the supplied hasher's state.
+
+Exports contain fingerprints and length only. They do not preserve RNG state, and imports initialize `ThreadRng`, so the current export/import API does not resume deterministic eviction after restoring a snapshot.
+
+## About cuckoo filters
 
 Cuckoo filter is a Bloom filter replacement for approximated set-membership queries. While Bloom filters are well-known space-efficient data structures to serve queries like "if item x is in a set?", they do not support deletion. Their variances to enable deletion (like counting Bloom filters) usually require much more space.
 
@@ -19,16 +51,14 @@ For details about the algorithm and citations please use this article for now
 ```rust
 extern crate cuckoofilter;
 
-...
-
 let value: &str = "hello world";
 
 // Create cuckoo filter with default max capacity of 1000000 items
-let mut cf = cuckoofilter::new();
+let mut cf = cuckoofilter::CuckooFilter::new();
 
 // Add data to the filter
 let success = cf.add(value).unwrap();
-// success ==> Ok(())
+// success ==> ()
 
 // Lookup if data is in the filter
 let success = cf.contains(value);
@@ -36,7 +66,7 @@ let success = cf.contains(value);
 
 // Test and add to the filter (if data does not exists then add)
 let success = cf.test_and_add(value).unwrap();
-// success ==> Ok(false)
+// success ==> false
 
 // Remove data from the filter.
 let success = cf.delete(value);
@@ -44,8 +74,7 @@ let success = cf.delete(value);
 ```
 
 ## C Interface
-This crate has a C interface for embedding it into other languages than Rust.
-See the [C Interface Documentation](https://docs.rs/cuckoofilter_cabi) for more details.
+The repository includes the upstream C interface in `cabi/`. It is not part of this crate's published package and is not published separately by this fork.
 
 
 ## Notes & TODOs
