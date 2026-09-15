@@ -12,7 +12,7 @@ The library keeps the `cuckoofilter` import name. Replace the upstream dependenc
 
 ```toml
 [dependencies]
-cuckoofilter = { package = "valkey-cuckoo", version = "0.1.0" }
+cuckoofilter = { package = "valkey-cuckoo", version = "0.2.0" }
 ```
 
 ## Deterministic eviction
@@ -33,7 +33,11 @@ Identical RNG states and operation sequences produce identical eviction choices 
 
 `new()` and `with_capacity()` continue to use `ThreadRng`; storing it makes the default filter neither `Send` nor `Sync`. Seeded RNGs such as `ChaCha8Rng` can provide those traits. `with_hasher_and_rng` selects the hasher type; it does not retain the supplied hasher's state.
 
-Exports contain fingerprints and length only. They do not preserve RNG state, and imports initialize `ThreadRng`, so the current export/import API does not resume deterministic eviction after restoring a snapshot.
+Exports contain fingerprints and length only. To resume a snapshot, save the RNG state separately (available through `rng()`) and restore using `from_export_with_rng(exported, bucket_size, max_kicks, rng)`. For ChaCha8 with a fixed seed and stream, save `get_word_pos()` and restore it with `set_word_pos()`. The default `From` implementation still initializes `ThreadRng`.
+
+`with_config_and_rng` accepts runtime bucket sizes (1–255) and a maximum eviction count. Fingerprints are stored in a contiguous byte allocation. Use `try_add` to roll back fingerprints and RNG state on failed insertion; this requires an RNG whose clone has independent state. The legacy `add` method retains its upstream behavior of dropping an existing fingerprint if eviction fails.
+
+Version 0.2.0 is currently available on the `feat/valkey-snapshots` Git branch; the published crates.io release remains 0.1.0.
 
 ## About cuckoo filters
 

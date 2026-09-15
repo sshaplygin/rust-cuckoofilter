@@ -7,7 +7,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! cuckoofilter = { package = "valkey-cuckoo", version = "0.1.0" }
+//! cuckoofilter = { package = "valkey-cuckoo", version = "0.2.0" }
 //! ```
 //!
 //! And this in your crate root:
@@ -19,10 +19,9 @@
 mod bucket;
 mod util;
 
-use crate::bucket::{Bucket, Fingerprint, BUCKET_SIZE, FINGERPRINT_SIZE};
+use crate::bucket::{Fingerprint, BUCKET_SIZE};
 use crate::util::{get_alt_index, get_fai, FaI};
 
-use std::cmp;
 use std::collections::hash_map::DefaultHasher;
 use std::error::Error as StdError;
 use std::fmt;
@@ -43,11 +42,13 @@ pub const DEFAULT_CAPACITY: usize = (1 << 20) - 1;
 #[derive(Debug)]
 pub enum CuckooError {
     NotEnoughSpace,
+    InvalidConfiguration,
+    InvalidExport,
 }
 
 impl fmt::Display for CuckooError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str("NotEnoughSpace")
+        write!(f, "{:?}", self)
     }
 }
 
@@ -112,7 +113,9 @@ impl StdError for CuckooError {
 /// ```
 #[derive(Debug, Clone)]
 pub struct CuckooFilter<H, R = rand::rngs::ThreadRng> {
-    buckets: Box<[Bucket]>,
+    buckets: Box<[Fingerprint]>,
+    bucket_size: usize,
+    max_kicks: u32,
     len: usize,
     rng: R,
     _hasher: std::marker::PhantomData<H>,
@@ -170,43 +173,98 @@ impl<H: Hasher + Default, R: rand::RngCore> CuckooFilter<H, R> {
     /// );
     /// ```
     pub fn with_hasher_and_rng(capacity: usize, _hasher: H, rng: R) -> Self {
-        let capacity = cmp::max(1, capacity.next_power_of_two() / BUCKET_SIZE);
+        Self::with_config_and_rng(capacity, BUCKET_SIZE, MAX_REBUCKET, rng)
+            .expect("invalid filter capacity")
+    }
 
-        Self {
-            buckets: vec![Bucket::new(); capacity].into_boxed_slice(),
+    /// Construct a filter with a runtime bucket size and eviction limit.
+    pub fn with_config_and_rng(
+        capacity: usize,
+        bucket_size: usize,
+        max_kicks: u32,
+        rng: R,
+    ) -> Result<Self, CuckooError> {
+        let slots = Self::allocation_size(capacity, bucket_size)?;
+        if max_kicks == 0 {
+            return Err(CuckooError::InvalidConfiguration);
+        }
+        Ok(Self {
+            buckets: vec![Fingerprint::empty(); slots].into_boxed_slice(),
+            bucket_size,
+            max_kicks,
             len: 0,
             rng,
             _hasher: PhantomData,
-        }
+        })
     }
-}
 
-impl<H> CuckooFilter<H, rand::rngs::ThreadRng>
-where
-    H: Hasher + Default,
-{
-    /// Constructs a Cuckoo Filter with a given max capacity
-    pub fn with_capacity(cap: usize) -> Self {
-        let capacity = cmp::max(1, cap.next_power_of_two() / BUCKET_SIZE);
+    /// Number of fingerprint bytes allocated for these parameters.
+    pub fn allocation_size(capacity: usize, bucket_size: usize) -> Result<usize, CuckooError> {
+        if !(1..=255).contains(&bucket_size) {
+            return Err(CuckooError::InvalidConfiguration);
+        }
+        let count = capacity
+            .max(1)
+            .checked_add(bucket_size - 1)
+            .and_then(|n| (n / bucket_size).checked_next_power_of_two())
+            .and_then(|n| n.checked_mul(bucket_size))
+            .filter(|n| *n <= isize::MAX as usize)
+            .ok_or(CuckooError::InvalidConfiguration)?;
+        Ok(count)
+    }
 
-        Self {
-            buckets: vec![Bucket::new(); capacity].into_boxed_slice(),
-            len: 0,
-            rng: rand::thread_rng(),
+    /// Restore raw buckets with an explicitly supplied RNG state and configuration.
+    pub fn from_export_with_rng(
+        exported: ExportedCuckooFilter,
+        bucket_size: usize,
+        max_kicks: u32,
+        rng: R,
+    ) -> Result<Self, CuckooError> {
+        if !(1..=255).contains(&bucket_size)
+            || max_kicks == 0
+            || exported.values.is_empty()
+            || !exported.values.len().is_multiple_of(bucket_size)
+            || !(exported.values.len() / bucket_size).is_power_of_two()
+        {
+            return Err(CuckooError::InvalidExport);
+        }
+        let buckets: Box<[_]> = exported
+            .values
+            .into_iter()
+            .map(|b| Fingerprint { data: [b] })
+            .collect();
+        if buckets.iter().filter(|f| !f.is_empty()).count() != exported.length {
+            return Err(CuckooError::InvalidExport);
+        }
+        Ok(Self {
+            buckets,
+            bucket_size,
+            max_kicks,
+            len: exported.length,
+            rng,
             _hasher: PhantomData,
-        }
+        })
     }
-}
 
-impl<H: Hasher + Default, R: rand::RngCore> CuckooFilter<H, R> {
+    /// Access the RNG for saving its state alongside exported fingerprints.
+    pub fn rng(&self) -> &R {
+        &self.rng
+    }
+
+    /// Number of allocated buckets.
+    pub fn bucket_count(&self) -> usize {
+        self.buckets.len() / self.bucket_size
+    }
+
+    fn bucket(&self, index: usize) -> &[Fingerprint] {
+        let start = (index % self.bucket_count()) * self.bucket_size;
+        &self.buckets[start..start + self.bucket_size]
+    }
+
     /// Checks if `data` is in the filter.
     pub fn contains<T: ?Sized + Hash>(&self, data: &T) -> bool {
         let FaI { fp, i1, i2 } = get_fai::<T, H>(data);
-        let len = self.buckets.len();
-        self.buckets[i1 % len]
-            .get_fingerprint_index(fp)
-            .or_else(|| self.buckets[i2 % len].get_fingerprint_index(fp))
-            .is_some()
+        self.bucket(i1).contains(&fp) || self.bucket(i2).contains(&fp)
     }
 
     /// Adds `data` to the filter. Returns `Ok` if the insertion was successful,
@@ -221,33 +279,50 @@ impl<H: Hasher + Default, R: rand::RngCore> CuckooFilter<H, R> {
     /// actually added to the filter, but some random *other* element was
     /// removed. This might improve in the future.
     pub fn add<T: ?Sized + Hash>(&mut self, data: &T) -> Result<(), CuckooError> {
+        self.insert(data, false)
+    }
+
+    /// Insert without dropping existing fingerprints on failure.
+    /// The RNG must clone into an independent state to roll back its stream too.
+    pub fn try_add<T: ?Sized + Hash>(&mut self, data: &T) -> Result<(), CuckooError>
+    where
+        R: Clone,
+    {
+        let previous_rng = self.rng.clone();
+        let result = self.insert(data, true);
+        if result.is_err() {
+            self.rng = previous_rng;
+        }
+        result
+    }
+
+    fn insert<T: ?Sized + Hash>(&mut self, data: &T, rollback: bool) -> Result<(), CuckooError> {
         let fai = get_fai::<T, H>(data);
         if self.put(fai.fp, fai.i1) || self.put(fai.fp, fai.i2) {
             return Ok(());
         }
-        let len = self.buckets.len();
-        let mut i = fai.random_index(&mut self.rng);
+        let mut index = fai.random_index(&mut self.rng);
         let mut fp = fai.fp;
-        for _ in 0..MAX_REBUCKET {
-            let other_fp;
-            {
-                let loc = &mut self.buckets[i % len].buffer[self.rng.gen_range(0..BUCKET_SIZE)];
-                other_fp = *loc;
-                *loc = fp;
-                i = get_alt_index::<H>(other_fp, i);
+        let mut changes = Vec::new();
+        for _ in 0..self.max_kicks {
+            let slot = (index % self.bucket_count()) * self.bucket_size
+                + self.rng.gen_range(0..self.bucket_size);
+            let displaced = self.buckets[slot];
+            if rollback {
+                changes.push((slot, displaced));
             }
-            if self.put(other_fp, i) {
+            self.buckets[slot] = fp;
+            index = get_alt_index::<H>(displaced, index);
+            if self.put(displaced, index) {
                 return Ok(());
             }
-            fp = other_fp;
+            fp = displaced;
         }
-        // fp is dropped here, which means that the last item that was
-        // rebucketed gets removed from the filter.
-        // TODO: One could introduce a single-item cache for this element,
-        // check this cache in all methods additionally to the actual filter,
-        // and return NotEnoughSpace if that cache is already in use.
-        // This would complicate the code, but stop random elements from
-        // getting removed and result in nicer behavior for the user.
+        if rollback {
+            for (slot, previous) in changes.into_iter().rev() {
+                self.buckets[slot] = previous;
+            }
+        }
         Err(CuckooError::NotEnoughSpace)
     }
 
@@ -277,7 +352,7 @@ impl<H: Hasher + Default, R: rand::RngCore> CuckooFilter<H, R> {
 
     /// Number of bytes the filter occupies in memory
     pub fn memory_usage(&self) -> usize {
-        mem::size_of_val(self) + self.buckets.len() * mem::size_of::<Bucket>()
+        mem::size_of_val(self) + self.buckets.len() * mem::size_of::<Fingerprint>()
     }
 
     /// Check if filter is empty
@@ -299,38 +374,48 @@ impl<H: Hasher + Default, R: rand::RngCore> CuckooFilter<H, R> {
         }
 
         for bucket in self.buckets.iter_mut() {
-            bucket.clear();
+            *bucket = Fingerprint::empty();
         }
         self.len = 0;
     }
 
     /// Extracts fingerprint values from all buckets, used for exporting the filters data.
     fn values(&self) -> Vec<u8> {
-        self.buckets
-            .iter()
-            .flat_map(|b| b.get_fingerprint_data().into_iter())
-            .collect()
+        self.buckets.iter().map(|f| f.data[0]).collect()
     }
 
-    /// Removes the item with the given fingerprint from the bucket indexed by i.
-    fn remove(&mut self, fp: Fingerprint, i: usize) -> bool {
-        let len = self.buckets.len();
-        if self.buckets[i % len].delete(fp) {
+    fn remove(&mut self, fp: Fingerprint, index: usize) -> bool {
+        let start = (index % self.bucket_count()) * self.bucket_size;
+        if let Some(slot) = self.buckets[start..start + self.bucket_size]
+            .iter_mut()
+            .find(|f| **f == fp)
+        {
+            *slot = Fingerprint::empty();
             self.len -= 1;
-            true
-        } else {
-            false
+            return true;
         }
+        false
     }
 
-    fn put(&mut self, fp: Fingerprint, i: usize) -> bool {
-        let len = self.buckets.len();
-        if self.buckets[i % len].insert(fp) {
+    fn put(&mut self, fp: Fingerprint, index: usize) -> bool {
+        let start = (index % self.bucket_count()) * self.bucket_size;
+        if let Some(slot) = self.buckets[start..start + self.bucket_size]
+            .iter_mut()
+            .find(|f| f.is_empty())
+        {
+            *slot = fp;
             self.len += 1;
-            true
-        } else {
-            false
+            return true;
         }
+        false
+    }
+}
+
+impl<H: Hasher + Default> CuckooFilter<H> {
+    /// Construct a filter with default bucket size, eviction limit, and thread RNG.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self::with_config_and_rng(capacity, BUCKET_SIZE, MAX_REBUCKET, rand::thread_rng())
+            .expect("invalid filter capacity")
     }
 }
 
@@ -343,31 +428,10 @@ pub struct ExportedCuckooFilter {
     pub length: usize,
 }
 
-impl<H> From<ExportedCuckooFilter> for CuckooFilter<H> {
-    /// Converts a simplified representation of a filter used for export to a
-    /// fully functioning version.
-    ///
-    /// # Contents
-    ///
-    /// * `values` - A serialized version of the `CuckooFilter`'s memory, where the
-    ///   fingerprints in each bucket are chained one after another, then in turn all
-    ///   buckets are chained together.
-    /// * `length` - The number of valid fingerprints inside the `CuckooFilter`.
-    ///   This value is used as a time saving method, otherwise all fingerprints
-    ///   would need to be checked for equivalence against the null pattern.
+impl<H: Hasher + Default> From<ExportedCuckooFilter> for CuckooFilter<H> {
     fn from(exported: ExportedCuckooFilter) -> Self {
-        // Assumes that the `BUCKET_SIZE` and `FINGERPRINT_SIZE` constants do not change.
-        Self {
-            buckets: exported
-                .values
-                .chunks(BUCKET_SIZE * FINGERPRINT_SIZE)
-                .map(Bucket::from)
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-            len: exported.length,
-            rng: rand::thread_rng(),
-            _hasher: PhantomData,
-        }
+        Self::from_export_with_rng(exported, BUCKET_SIZE, MAX_REBUCKET, rand::thread_rng())
+            .expect("invalid exported filter")
     }
 }
 
@@ -418,5 +482,74 @@ mod tests {
         // Check that eviction actually consumed the injected RNG.
         assert!(filter1.rng.get_word_pos() > 0);
         assert_eq!(filter1.rng.get_word_pos(), filter2.rng.get_word_pos());
+    }
+    #[test]
+    fn transactional_insert_and_snapshot_resume() {
+        let mut filter = CuckooFilter::<DefaultHasher, _>::with_config_and_rng(
+            32,
+            2,
+            3,
+            ChaCha8Rng::seed_from_u64(42),
+        )
+        .unwrap();
+        let mut successes = Vec::new();
+        let mut failures = 0;
+        for item in 0..100_u64 {
+            let before = filter.export();
+            let position = filter.rng().get_word_pos();
+            if filter.try_add(&item).is_ok() {
+                successes.push(item);
+            } else {
+                failures += 1;
+                assert_eq!(filter.export().values, before.values);
+                assert_eq!(filter.len(), before.length);
+                assert_eq!(filter.rng().get_word_pos(), position);
+            }
+            for value in &successes {
+                assert!(filter.contains(value));
+            }
+        }
+        assert!(failures > 0);
+        let mut restored = CuckooFilter::<DefaultHasher, _>::from_export_with_rng(
+            filter.export(),
+            2,
+            3,
+            filter.rng().clone(),
+        )
+        .unwrap();
+        for item in 100..200_u64 {
+            assert_eq!(
+                filter.try_add(&item).is_ok(),
+                restored.try_add(&item).is_ok()
+            );
+            assert_eq!(filter.export().values, restored.export().values);
+            assert_eq!(filter.rng().get_word_pos(), restored.rng().get_word_pos());
+        }
+    }
+
+    #[test]
+    fn configurable_buckets_and_invalid_snapshots() {
+        for size in [1, 2, 4, 8, 255] {
+            let filter = CuckooFilter::<DefaultHasher, _>::with_config_and_rng(
+                100,
+                size,
+                10,
+                ChaCha8Rng::seed_from_u64(42),
+            )
+            .unwrap();
+            assert!(filter.bucket_count().is_power_of_two());
+            assert_eq!(filter.export().values.len(), filter.bucket_count() * size);
+            assert!(filter.export().values.len() >= 100);
+            let mut invalid = filter.export();
+            invalid.length = 1;
+            assert!(CuckooFilter::<DefaultHasher, _>::from_export_with_rng(
+                invalid,
+                size,
+                10,
+                ChaCha8Rng::seed_from_u64(42),
+            )
+            .is_err());
+        }
+        assert!(CuckooFilter::<DefaultHasher>::allocation_size(usize::MAX, 4).is_err());
     }
 }

@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
+## valkey-cuckoo 0.2.0 (unreleased)
+
+- Add configurable bucket sizes and eviction limits with contiguous fingerprint storage.
+- Add transactional `try_add`, restoring both buckets and independently cloned RNG state on failure.
+- Add validated `from_export_with_rng`, RNG access, and allocation-size reporting for snapshot restoration and memory budgeting.
+
 ## valkey-cuckoo 0.1.0
 
 - Initial independent fork of `cuckoofilter` 0.5.0, retaining its MIT license and `cuckoofilter` library name.

@@ -20,7 +20,7 @@ build = "build.rs"
 lto = true
 
 [dependencies]
-cuckoofilter = { package = "valkey-cuckoo", version = "0.1", path = "../" }
+cuckoofilter = { package = "valkey-cuckoo", version = "0.2", path = "../" }
 
 [build-dependencies]
 cbindgen = "0.24.3"

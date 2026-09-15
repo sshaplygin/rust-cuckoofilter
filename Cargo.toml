@@ -1,6 +1,6 @@
 [package]
 name = "valkey-cuckoo"
-version = "0.1.0"
+version = "0.2.0"
 authors = [
   "Sam Shaplygin <semyuon@gmail.com>",
   "Seif Lotfy <seif.lotfy@gmail.com>",
