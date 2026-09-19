@@ -91,7 +91,7 @@ the RNG word position using SipHash-1-3 with zero keys, canonical input encoding
 and ChaCha8 seeded with 42. Changes to these values require an explicit review
 of snapshot and replication compatibility.
 
-Version 0.2.0 is currently available on the `feat/valkey-snapshots` Git branch; the published crates.io release remains 0.1.0.
+See [CHANGELOG.md](CHANGELOG.md#compatibility-with-010) for migration notes from 0.1.0.
 
 ## About cuckoo filters
 

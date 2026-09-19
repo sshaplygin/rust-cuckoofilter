@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
-## valkey-cuckoo 0.2.0 (unreleased)
+## valkey-cuckoo 0.2.0 — 2026-09-19
 
 - Add configurable bucket sizes and eviction limits with contiguous fingerprint storage.
 - Add transactional `try_add`, restoring both buckets and independently cloned RNG state on failure.
@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 - Add reusable `ItemHash` and `hash_item`, `contains_hashed`, `count_hashed`, `try_add_hashed`, and `delete_hashed`. Counts include duplicate fingerprints and count coincident candidate buckets once.
 - Add `try_add_no_evict_hashed` to fill a free candidate slot without allocation, eviction, or RNG consumption; failure leaves the filter unchanged.
 - Add a fixed SipHash-1-3 / ChaCha8 snapshot fixture covering bucket bytes and RNG position, captured before the storage refactor, plus regression tests for the new APIs.
+- Update the C wrapper to handle the new error variants explicitly and add a dedicated C ABI check in CI.
+
+### Compatibility with 0.1.0
+
+- `CuckooError` gains `InvalidConfiguration` and `InvalidExport`; exhaustive matches must handle these variants.
+- `From<ExportedCuckooFilter>` now requires `H: Hasher + Default` and panics for invalid snapshots. Use the explicit restoration methods to receive a `Result` instead. Valid default-bucket snapshots retain their byte layout.
+- The legacy `add` method retains its behavior of dropping an existing fingerprint when insertion fails. Use `try_add` or `try_add_hashed` for rollback, with an RNG whose clone has independent state.
+- Exported snapshots still contain only fingerprints and length. Save the configuration and RNG state separately to resume deterministic insertion.
 
 ## valkey-cuckoo 0.1.0
 
