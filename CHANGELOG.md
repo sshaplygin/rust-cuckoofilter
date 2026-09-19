@@ -5,7 +5,20 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- Injectable RNGs through `with_rng` and `with_hasher_and_rng`, with `ThreadRng` as the default.
+- Configurable bucket sizes and eviction limits through `with_config_and_rng`, plus allocation-size reporting.
+- Transactional `try_add` and `try_add_hashed`, restoring fingerprints and independently cloned RNG state on insertion failure.
+- Reusable `ItemHash`, membership and deletion with precomputed hashes, duplicate fingerprint counts, and insertion without eviction or RNG consumption.
+- Contiguous byte storage with `as_bytes`, ownership-based `realloc_buckets`, and validated snapshot restoration through `from_bytes_with_rng` and `from_export_with_rng`.
+- RNG access for saving its state separately from exported fingerprints.
+- A fixed SipHash-1-3 / ChaCha8 snapshot fixture covering bucket bytes and RNG position, and regression tests for rollback, duplicate counts, raw snapshots, and relocation.
+
 ### Changed
+- Storing `ThreadRng` makes the default filter neither `Send` nor `Sync`; callers can supply an RNG with the needed traits.
+- Add `InvalidConfiguration` and `InvalidExport` to `CuckooError`; exhaustive matches must handle these variants.
+- `From<ExportedCuckooFilter>` now requires `H: Hasher + Default` and rejects invalid snapshots instead of constructing an invalid filter. Valid default-bucket snapshots retain their byte layout.
+- `test_and_add` hashes the item once per call.
 - Serde support is now behind the feature flag `serde_support` and is disabled by default.
 
 ## [v0.4.0] - 2018-04-1
