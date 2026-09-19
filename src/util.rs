@@ -4,13 +4,17 @@ use std::hash::{Hash, Hasher};
 
 use byteorder::{BigEndian, WriteBytesExt};
 
-// A struct combining *F*ingerprint *a*nd *I*ndexes,
-// to have a return type with named fields
-// instead of a tuple with unnamed fields.
-pub struct FaI {
-    pub fp: Fingerprint,
-    pub i1: usize,
-    pub i2: usize,
+/// A precomputed fingerprint and pair of bucket indices.
+///
+/// Created by [`crate::CuckooFilter::hash_item`]. It can be reused across filters
+/// of different capacities and bucket sizes that use the same hasher type and
+/// hashing behavior. Using a different hasher can produce incorrect results.
+/// Indices are reduced to each filter's bucket count when accessed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ItemHash {
+    pub(crate) fp: Fingerprint,
+    pub(crate) i1: usize,
+    pub(crate) i2: usize,
 }
 
 fn get_hash<T: ?Sized + Hash, H: Hasher + Default>(data: &T) -> (u32, u32) {
@@ -29,7 +33,7 @@ pub fn get_alt_index<H: Hasher + Default>(fp: Fingerprint, i: usize) -> usize {
     i ^ alt_i
 }
 
-impl FaI {
+impl ItemHash {
     fn from_data<T: ?Sized + Hash, H: Hasher + Default>(data: &T) -> Self {
         let (fp_hash, index_hash) = get_hash::<_, H>(data);
 
@@ -66,8 +70,8 @@ impl FaI {
     }
 }
 
-pub fn get_fai<T: ?Sized + Hash, H: Hasher + Default>(data: &T) -> FaI {
-    FaI::from_data::<_, H>(data)
+pub fn get_fai<T: ?Sized + Hash, H: Hasher + Default>(data: &T) -> ItemHash {
+    ItemHash::from_data::<_, H>(data)
 }
 
 #[cfg(test)]
@@ -79,7 +83,7 @@ mod tests {
         use std::collections::hash_map::DefaultHasher;
         let data = "seif";
         let fai = get_fai::<_, DefaultHasher>(data);
-        let FaI { fp, i1, i2 } = fai;
+        let ItemHash { fp, i1, i2 } = fai;
         let i11 = get_alt_index::<DefaultHasher>(fp, i2);
         assert_eq!(i11, i1);
 

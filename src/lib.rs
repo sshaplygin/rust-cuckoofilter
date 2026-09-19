@@ -19,8 +19,10 @@
 mod bucket;
 mod util;
 
-use crate::bucket::{Fingerprint, BUCKET_SIZE};
-use crate::util::{get_alt_index, get_fai, FaI};
+use crate::bucket::{Fingerprint, BUCKET_SIZE, EMPTY_FINGERPRINT};
+use crate::util::{get_alt_index, get_fai};
+
+pub use crate::util::ItemHash;
 
 use std::collections::hash_map::DefaultHasher;
 use std::error::Error as StdError;
@@ -113,7 +115,7 @@ impl StdError for CuckooError {
 /// ```
 #[derive(Debug, Clone)]
 pub struct CuckooFilter<H, R = rand::rngs::ThreadRng> {
-    buckets: Box<[Fingerprint]>,
+    buckets: Box<[u8]>,
     bucket_size: usize,
     max_kicks: u32,
     len: usize,
@@ -189,7 +191,7 @@ impl<H: Hasher + Default, R: rand::RngCore> CuckooFilter<H, R> {
             return Err(CuckooError::InvalidConfiguration);
         }
         Ok(Self {
-            buckets: vec![Fingerprint::empty(); slots].into_boxed_slice(),
+            buckets: vec![EMPTY_FINGERPRINT; slots].into_boxed_slice(),
             bucket_size,
             max_kicks,
             len: 0,
@@ -220,30 +222,87 @@ impl<H: Hasher + Default, R: rand::RngCore> CuckooFilter<H, R> {
         max_kicks: u32,
         rng: R,
     ) -> Result<Self, CuckooError> {
+        Self::from_bytes_with_rng(
+            exported.values.into_boxed_slice(),
+            exported.length,
+            bucket_size,
+            max_kicks,
+            rng,
+        )
+    }
+
+    /// Restore an owned fingerprint buffer without copying it.
+    ///
+    /// Validates the configuration, buffer size, and number of occupied slots.
+    /// Byte 100 marks an empty slot; all other values are fingerprints.
+    /// The caller must supply the original hasher type, bucket size, eviction
+    /// limit, and RNG state to continue the same insertion sequence.
+    pub fn from_bytes_with_rng(
+        values: Box<[u8]>,
+        length: usize,
+        bucket_size: usize,
+        max_kicks: u32,
+        rng: R,
+    ) -> Result<Self, CuckooError> {
         if !(1..=255).contains(&bucket_size)
             || max_kicks == 0
-            || exported.values.is_empty()
-            || !exported.values.len().is_multiple_of(bucket_size)
-            || !(exported.values.len() / bucket_size).is_power_of_two()
+            || values.is_empty()
+            || !values.len().is_multiple_of(bucket_size)
+            || !(values.len() / bucket_size).is_power_of_two()
+            || values.iter().filter(|&&fp| fp != EMPTY_FINGERPRINT).count() != length
         {
             return Err(CuckooError::InvalidExport);
         }
-        let buckets: Box<[_]> = exported
-            .values
-            .into_iter()
-            .map(|b| Fingerprint { data: [b] })
-            .collect();
-        if buckets.iter().filter(|f| !f.is_empty()).count() != exported.length {
-            return Err(CuckooError::InvalidExport);
-        }
         Ok(Self {
-            buckets,
+            buckets: values,
             bucket_size,
             max_kicks,
-            len: exported.length,
+            len: length,
             rng,
             _hasher: PhantomData,
         })
+    }
+
+    /// Borrow the raw fingerprint bytes without copying, one byte per slot.
+    /// Byte 100 marks an empty slot; the layout matches [`Self::export`].
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.buckets
+    }
+
+    /// Transfer the bucket allocation to `f` and install the returned allocation.
+    ///
+    /// The callback must preserve every byte and the allocation's length. This
+    /// supports relocating storage during defragmentation without copying here.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the returned length changes. If this happens or `f` panics,
+    /// the filter is cleared, retaining its capacity and RNG state.
+    pub fn realloc_buckets(&mut self, f: impl FnOnce(Box<[u8]>) -> Box<[u8]>) {
+        // Ownership cannot be recovered if the callback unwinds. Keep the filter
+        // usable if the caller catches that panic; allocate only on this path.
+        struct RestoreOnPanic<'a> {
+            buckets: &'a mut Box<[u8]>,
+            len: &'a mut usize,
+            slots: usize,
+        }
+        impl Drop for RestoreOnPanic<'_> {
+            fn drop(&mut self) {
+                if self.buckets.is_empty() {
+                    *self.buckets = vec![EMPTY_FINGERPRINT; self.slots].into_boxed_slice();
+                    *self.len = 0;
+                }
+            }
+        }
+        let slots = self.buckets.len();
+        let guard = RestoreOnPanic {
+            buckets: &mut self.buckets,
+            len: &mut self.len,
+            slots,
+        };
+        let buckets = f(mem::take(guard.buckets));
+        assert_eq!(buckets.len(), slots, "bucket allocation length changed");
+        *guard.buckets = buckets;
     }
 
     /// Access the RNG for saving its state alongside exported fingerprints.
@@ -256,15 +315,56 @@ impl<H: Hasher + Default, R: rand::RngCore> CuckooFilter<H, R> {
         self.buckets.len() / self.bucket_size
     }
 
-    fn bucket(&self, index: usize) -> &[Fingerprint] {
+    fn bucket(&self, index: usize) -> &[u8] {
         let start = (index % self.bucket_count()) * self.bucket_size;
         &self.buckets[start..start + self.bucket_size]
     }
 
-    /// Checks if `data` is in the filter.
+    /// Hash an item once for use with the `*_hashed` methods.
+    /// The result can be reused across filters with the same hasher, regardless
+    /// of capacity, bucket size, or eviction limit.
+    pub fn hash_item<T: ?Sized + Hash>(data: &T) -> ItemHash {
+        get_fai::<T, H>(data)
+    }
+
+    /// Checks if `data` is in the filter. False positives are possible.
     pub fn contains<T: ?Sized + Hash>(&self, data: &T) -> bool {
-        let FaI { fp, i1, i2 } = get_fai::<T, H>(data);
-        self.bucket(i1).contains(&fp) || self.bucket(i2).contains(&fp)
+        self.contains_hashed(&Self::hash_item(data))
+    }
+
+    /// Check membership using a hash produced with this filter's hasher.
+    pub fn contains_hashed(&self, h: &ItemHash) -> bool {
+        self.bucket(h.i1).contains(&h.fp.data[0]) || self.bucket(h.i2).contains(&h.fp.data[0])
+    }
+
+    /// Count matching fingerprints in the two candidate buckets.
+    ///
+    /// Counts duplicate insertions, but collisions can overestimate the number
+    /// of copies of an item. A bucket shared by both indices is counted once.
+    /// The hash must have been produced with this filter's hasher.
+    pub fn count_hashed(&self, h: &ItemHash) -> usize {
+        let count = |index| {
+            self.bucket(index)
+                .iter()
+                .filter(|&&fp| fp == h.fp.data[0])
+                .count()
+        };
+        let first = count(h.i1);
+        if h.i1 % self.bucket_count() == h.i2 % self.bucket_count() {
+            first
+        } else {
+            first + count(h.i2)
+        }
+    }
+
+    /// Insert into a free slot in either candidate bucket, without evictions.
+    ///
+    /// Inserts another fingerprint even if one already matches. Returns false
+    /// without changing buckets, length, or RNG when neither bucket has room.
+    /// Takes O(bucket_size) time and does not consume randomness or allocate.
+    /// The hash must have been produced with this filter's hasher.
+    pub fn try_add_no_evict_hashed(&mut self, h: &ItemHash) -> bool {
+        self.put(h.fp.data[0], h.i1) || self.put(h.fp.data[0], h.i2)
     }
 
     /// Adds `data` to the filter. Returns `Ok` if the insertion was successful,
@@ -279,7 +379,7 @@ impl<H: Hasher + Default, R: rand::RngCore> CuckooFilter<H, R> {
     /// actually added to the filter, but some random *other* element was
     /// removed. This might improve in the future.
     pub fn add<T: ?Sized + Hash>(&mut self, data: &T) -> Result<(), CuckooError> {
-        self.insert(data, false)
+        self.insert(&Self::hash_item(data), false)
     }
 
     /// Insert without dropping existing fingerprints on failure.
@@ -288,21 +388,32 @@ impl<H: Hasher + Default, R: rand::RngCore> CuckooFilter<H, R> {
     where
         R: Clone,
     {
+        self.try_add_hashed(&Self::hash_item(data))
+    }
+
+    /// Insert a precomputed hash, including another copy of a matching fingerprint.
+    ///
+    /// On failure restores buckets, length, and RNG state. The hash must have
+    /// been produced with this filter's hasher, and the RNG's clone must have
+    /// independent state for its stream to be rolled back.
+    pub fn try_add_hashed(&mut self, h: &ItemHash) -> Result<(), CuckooError>
+    where
+        R: Clone,
+    {
         let previous_rng = self.rng.clone();
-        let result = self.insert(data, true);
+        let result = self.insert(h, true);
         if result.is_err() {
             self.rng = previous_rng;
         }
         result
     }
 
-    fn insert<T: ?Sized + Hash>(&mut self, data: &T, rollback: bool) -> Result<(), CuckooError> {
-        let fai = get_fai::<T, H>(data);
-        if self.put(fai.fp, fai.i1) || self.put(fai.fp, fai.i2) {
+    fn insert(&mut self, h: &ItemHash, rollback: bool) -> Result<(), CuckooError> {
+        if self.try_add_no_evict_hashed(h) {
             return Ok(());
         }
-        let mut index = fai.random_index(&mut self.rng);
-        let mut fp = fai.fp;
+        let mut index = h.random_index(&mut self.rng);
+        let mut fp = h.fp.data[0];
         let mut changes = Vec::new();
         for _ in 0..self.max_kicks {
             let slot = (index % self.bucket_count()) * self.bucket_size
@@ -312,7 +423,7 @@ impl<H: Hasher + Default, R: rand::RngCore> CuckooFilter<H, R> {
                 changes.push((slot, displaced));
             }
             self.buckets[slot] = fp;
-            index = get_alt_index::<H>(displaced, index);
+            index = get_alt_index::<H>(Fingerprint { data: [displaced] }, index);
             if self.put(displaced, index) {
                 return Ok(());
             }
@@ -330,10 +441,11 @@ impl<H: Hasher + Default, R: rand::RngCore> CuckooFilter<H, R> {
     /// Returns `Ok(true)` if `data` was not yet present in the filter and added
     /// successfully.
     pub fn test_and_add<T: ?Sized + Hash>(&mut self, data: &T) -> Result<bool, CuckooError> {
-        if self.contains(data) {
+        let h = Self::hash_item(data);
+        if self.contains_hashed(&h) {
             Ok(false)
         } else {
-            self.add(data).map(|_| true)
+            self.insert(&h, false).map(|_| true)
         }
     }
 
@@ -352,7 +464,7 @@ impl<H: Hasher + Default, R: rand::RngCore> CuckooFilter<H, R> {
 
     /// Number of bytes the filter occupies in memory
     pub fn memory_usage(&self) -> usize {
-        mem::size_of_val(self) + self.buckets.len() * mem::size_of::<Fingerprint>()
+        mem::size_of_val(self) + self.buckets.len()
     }
 
     /// Check if filter is empty
@@ -363,8 +475,15 @@ impl<H: Hasher + Default, R: rand::RngCore> CuckooFilter<H, R> {
     /// Deletes `data` from the filter. Returns true if `data` existed in the
     /// filter before.
     pub fn delete<T: ?Sized + Hash>(&mut self, data: &T) -> bool {
-        let FaI { fp, i1, i2 } = get_fai::<T, H>(data);
-        self.remove(fp, i1) || self.remove(fp, i2)
+        self.delete_hashed(&Self::hash_item(data))
+    }
+
+    /// Remove one matching fingerprint using a precomputed hash.
+    ///
+    /// Only delete items known to have been inserted: false positives can cause
+    /// deletion of a different item. The hash must use this filter's hasher.
+    pub fn delete_hashed(&mut self, h: &ItemHash) -> bool {
+        self.remove(h.fp.data[0], h.i1) || self.remove(h.fp.data[0], h.i2)
     }
 
     /// Empty all the buckets in a filter and reset the number of items.
@@ -373,35 +492,33 @@ impl<H: Hasher + Default, R: rand::RngCore> CuckooFilter<H, R> {
             return;
         }
 
-        for bucket in self.buckets.iter_mut() {
-            *bucket = Fingerprint::empty();
-        }
+        self.buckets.fill(EMPTY_FINGERPRINT);
         self.len = 0;
     }
 
     /// Extracts fingerprint values from all buckets, used for exporting the filters data.
     fn values(&self) -> Vec<u8> {
-        self.buckets.iter().map(|f| f.data[0]).collect()
+        self.as_bytes().to_vec()
     }
 
-    fn remove(&mut self, fp: Fingerprint, index: usize) -> bool {
+    fn remove(&mut self, fp: u8, index: usize) -> bool {
         let start = (index % self.bucket_count()) * self.bucket_size;
         if let Some(slot) = self.buckets[start..start + self.bucket_size]
             .iter_mut()
             .find(|f| **f == fp)
         {
-            *slot = Fingerprint::empty();
+            *slot = EMPTY_FINGERPRINT;
             self.len -= 1;
             return true;
         }
         false
     }
 
-    fn put(&mut self, fp: Fingerprint, index: usize) -> bool {
+    fn put(&mut self, fp: u8, index: usize) -> bool {
         let start = (index % self.bucket_count()) * self.bucket_size;
         if let Some(slot) = self.buckets[start..start + self.bucket_size]
             .iter_mut()
-            .find(|f| f.is_empty())
+            .find(|f| **f == EMPTY_FINGERPRINT)
         {
             *slot = fp;
             self.len += 1;

@@ -1,6 +1,6 @@
 pub const FINGERPRINT_SIZE: usize = 1;
 pub const BUCKET_SIZE: usize = 4;
-const EMPTY_FINGERPRINT_DATA: [u8; FINGERPRINT_SIZE] = [100; FINGERPRINT_SIZE];
+pub(crate) const EMPTY_FINGERPRINT: u8 = 100;
 
 // Fingerprint Size is 1 byte so lets remove the Vec
 #[derive(PartialEq, Eq, Copy, Clone, Hash, Debug)]
@@ -21,15 +21,8 @@ impl Fingerprint {
         }
     }
 
-    /// Returns the empty Fingerprint.
-    pub fn empty() -> Self {
-        Self {
-            data: EMPTY_FINGERPRINT_DATA,
-        }
-    }
-
     /// Checks if this is the empty Fingerprint.
     pub fn is_empty(&self) -> bool {
-        self.data == EMPTY_FINGERPRINT_DATA
+        self.data == [EMPTY_FINGERPRINT]
     }
 }
