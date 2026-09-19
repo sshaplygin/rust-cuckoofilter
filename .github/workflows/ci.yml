@@ -17,6 +17,19 @@ jobs:
               with:
                   command: check
 
+    cabi:
+        name: C ABI Check
+        runs-on: Ubuntu-latest
+        steps:
+            - uses: actions/checkout@v2
+            - uses: actions-rs/toolchain@v1
+              with:
+                  profile: minimal
+                  toolchain: stable
+                  override: true
+            - name: Check the C wrapper against the local library
+              run: cargo check --manifest-path cabi/Cargo.toml
+
     test:
         name: Test Suite ${{ matrix.os }}
         needs: check
