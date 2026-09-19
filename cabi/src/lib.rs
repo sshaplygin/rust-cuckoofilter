@@ -142,6 +142,11 @@ pub extern "C" fn rcf_cuckoofilter_add(
     {
         Ok(_) => rcf_cuckoofilter_status::RCF_OK,
         Err(CuckooError::NotEnoughSpace) => rcf_cuckoofilter_status::RCF_NOT_ENOUGH_SPACE,
+        Err(CuckooError::InvalidConfiguration | CuckooError::InvalidExport) => {
+            // Only construction and snapshot import can return these errors.
+            // An existing filter's add operation cannot invalidate its configuration.
+            unreachable!("CuckooFilter::add returned a configuration or snapshot error")
+        }
     }
 }
 
